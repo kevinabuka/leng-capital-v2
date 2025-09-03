@@ -1,91 +1,115 @@
 # src/ui/app.py
-
-# ---------------------------
-# Startup error catcher (shows real traceback in the browser)
-# ---------------------------
+from __future__ import annotations
+import os
+import json
+import pathlib
+import datetime as dt
 import streamlit as st
-import sys, os, traceback
-from pathlib import Path
 
-def run_safely(fn):
-    try:
-        fn()
-    except Exception:
-        st.error("App failed to start")
-        st.code("".join(traceback.format_exception(*sys.exc_info())))
-        st.stop()
+# Try to import your project modules
+ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
+os.chdir(ROOT)
 
-# ---------------------------
-# Application
-# ---------------------------
-def main():
-    # Basic page config
-    st.set_page_config(page_title="Leng Capital", page_icon="💸", layout="centered")
+db = None
+loan_logic = None
+try:
+    import db as db
+except Exception as e:
+    db = None
+    st.sidebar.warning(f"db.py not loaded: {e}")
 
-    # Make sure local imports work with a src/ layout:
-    # add the repo root to sys.path (…/leng-capital)
-    here = Path(__file__).resolve()
-    repo_root = here.parents[2]  # src/ui/app.py -> ui -> src -> <repo root>
-    if str(repo_root) not in sys.path:
-        sys.path.append(str(repo_root))
+try:
+    import loan_logic as loan_logic
+except Exception as e:
+    loan_logic = None
+    st.sidebar.warning(f"loan_logic.py not loaded: {e}")
 
-    st.title("Leng Capital – Lending App")
-    st.caption("Basic bootstrap to surface runtime errors and verify environment.")
+st.set_page_config(page_title="Leng Capital – Lending App", layout="wide")
 
-    # Environment panel
-    with st.expander("Environment & Paths", expanded=True):
-        st.write(
-            {
-                "Python": sys.version.split()[0],
-                "App file": str(here),
-                "Working dir (os.getcwd())": os.getcwd(),
-                "Repo root (detected)": str(repo_root),
-            }
-        )
+# --- Header ---
+st.title("Leng Capital – Lending App")
 
-    # Check pandas availability
-    pandas_ok = False
-    try:
-        import pandas as pd  # noqa: F401
-        pandas_ok = True
-        st.success("✅ pandas is installed and importable.")
-        st.write({"pandas_version": pd.__version__})
-    except Exception as e:
-        st.warning(
-            "⚠️ pandas could not be imported. "
-            "On Streamlit Cloud this usually means the Python version is wrong or wheels are missing. "
-            "Ensure `runtime.txt` contains `3.12.6` and that you redeployed."
-        )
-        st.code(repr(e))
+# --- Top info bar (lightweight env info, not the old scaffold) ---
+with st.expander("Environment", expanded=False):
+    st.json({
+        "python": os.popen("python -V").read().strip() or "unknown",
+        "app_file": str(pathlib.Path(__file__).resolve()),
+        "repo_root": str(ROOT),
+        "modules": {
+            "db_loaded": db is not None,
+            "loan_logic_loaded": loan_logic is not None
+        }
+    })
 
-    # Optional: quick data viewer if you have a seed file
-    st.subheader("Optional data check")
-    st.write(
-        "If you have a CSV at `data/seed.csv`, I’ll try to show its first few rows. "
-        "This is optional and won’t crash if the file is missing."
-    )
-    seed_csv = repo_root / "data" / "seed.csv"
-    if seed_csv.exists() and pandas_ok:
-        import pandas as pd
+# --- Tabs for the real UI ---
+tab_loans, tab_repayments, tab_reports, tab_settings = st.tabs(
+    ["Loans", "Repayments", "Reports", "Settings"]
+)
 
-        try:
-            df = pd.read_csv(seed_csv)
-            st.write(f"Found `{seed_csv}` with shape {df.shape}:")
-            st.dataframe(df.head(25))
-        except Exception as e:
-            st.warning("Could not read `data/seed.csv`:")
-            st.code("".join(traceback.format_exception(*sys.exc_info())))
+# ---- Loans tab ----
+with tab_loans:
+    st.subheader("Disburse a Loan")
+    with st.form("new_loan"):
+        borrower = st.text_input("Borrower name *")
+        principal = st.number_input("Principal (UGX) *", min_value=0, step=10_000)
+        disbursed_on = st.date_input("Disbursement date", value=dt.date.today())
+        weeks = st.number_input("Planned weeks", min_value=1, value=4)
+        processing_fee_pct = st.number_input("Processing fee (%)", value=1.0, step=0.1)
+        submitted = st.form_submit_button("Save loan")
+    if submitted:
+        if not borrower or principal <= 0:
+            st.error("Borrower and principal are required.")
+        else:
+            if db and hasattr(db, "save_loan"):
+                db.save_loan(
+                    borrower=borrower,
+                    principal=int(principal),
+                    disbursed_on=disbursed_on,
+                    weeks=int(weeks),
+                    processing_fee_pct=float(processing_fee_pct),
+                )
+                st.success("Loan saved.")
+            else:
+                st.info("Demo mode: db.save_loan not available; nothing was written.")
+
+    st.divider()
+    st.subheader("Amount Due Preview")
+    if loan_logic and hasattr(loan_logic, "amount_due"):
+        P = st.number_input("Preview principal (UGX)", min_value=0, value=200_000, step=10_000)
+        w = st.number_input("Weeks elapsed", min_value=0, value=3)
+        preview = loan_logic.amount_due(P=P, weeks_elapsed=w)
+        st.metric("Estimated amount due", f"{int(preview):,} UGX")
     else:
-        if not seed_csv.exists():
-            st.info("`data/seed.csv` not found (that’s OK).")
+        st.caption("Load `loan_logic.py` with `amount_due()` to enable this preview.")
 
-    # Placeholder for your actual app UI
-    st.markdown("---")
-    st.subheader("Your App Area")
-    st.write(
-        "Replace this section with your lending UI (forms, tables, charts). "
-        "This scaffold is only to make deployment smooth and errors visible."
-    )
+# ---- Repayments tab ----
+with tab_repayments:
+    st.subheader("Record a Repayment")
+    with st.form("new_repayment"):
+        borrower_r = st.text_input("Borrower name *")
+        amount = st.number_input("Amount (UGX) *", min_value=0, step=10_000)
+        paid_on = st.date_input("Payment date", value=dt.date.today())
+        submit_pay = st.form_submit_button("Save repayment")
+    if submit_pay:
+        if not borrower_r or amount <= 0:
+            st.error("Borrower and amount are required.")
+        else:
+            if db and hasattr(db, "save_repayment"):
+                db.save_repayment(borrower=borrower_r, amount=int(amount), paid_on=paid_on)
+                st.success("Repayment saved.")
+            else:
+                st.info("Demo mode: db.save_repayment not available; nothing was written.")
 
-if __name__ == "__main__":
-    run_safely(main)
+# ---- Reports tab ----
+with tab_reports:
+    st.subheader("Portfolio Snapshot")
+    if db and hasattr(db, "portfolio_snapshot"):
+        snap = db.portfolio_snapshot()
+        st.write(snap)
+    else:
+        st.info("Add `portfolio_snapshot()` in db.py to show live stats.")
+
+# ---- Settings tab ----
+with tab_settings:
+    st.subheader("App Settings")
+    st.caption("Place configuration controls here (rates, penalties, etc.).")
